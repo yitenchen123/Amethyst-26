@@ -7,6 +7,7 @@
 #import "WFWorkflowProgressView.h"
 #import "ios_uikit_bridge.h"
 #import "utils.h"
+#import <dlfcn.h>
 
 #pragma mark - Custom Cell & Header (reused from ForgeInstallViewController)
 
