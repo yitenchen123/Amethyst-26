@@ -1,59 +1,76 @@
 name: Development build
 
 on:
-  pull_request:
-    branches-ignore:
-      - 'l10n_main'
-    types: [opened, reopened]
-  push:
-    branches-ignore:
-      - 'l10n_main'
   workflow_dispatch:
 
 jobs:
   build:
     name: Development build
-    permissions:
-      contents: write
     strategy:
       matrix:
         include:
           - platform: 2
             platform_name: ios
 
-    runs-on: macos-latest
+    runs-on: macos-14
 
     steps:
+      - name: Show available Xcode and select a suitable one
+        run: |
+          set -e
+          echo "Available apps in /Applications (matching Xcode*):"
+          ls /Applications | grep -E "Xcode(.+)?\.app" || true
+          if [ -d "/Applications/Xcode_16.app" ]; then
+            echo "Selecting /Applications/Xcode_16.app"
+            sudo xcode-select -s /Applications/Xcode_16.app/Contents/Developer
+          elif [ -d "/Applications/Xcode_15.app" ]; then
+            echo "Selecting /Applications/Xcode_15.app"
+            sudo xcode-select -s /Applications/Xcode_15.app/Contents/Developer
+          elif [ -d "/Applications/Xcode.app" ]; then
+            echo "Selecting /Applications/Xcode.app"
+            sudo xcode-select -s /Applications/Xcode.app/Contents/Developer
+          else
+            echo "No preinstalled Xcode found under /Applications that matches the search. Leaving system default."
+          fi
+          xcodebuild -version || true
+          echo "Available simulator runtimes (for debugging):"
+          xcrun simctl list runtimes || true
+
+      - name: Install GNU Make
+        run: |
+          brew update
+          brew install make
+
+      - name: Install Java 8 (Temurin) via Homebrew
+        run: |
+          brew install --cask temurin@8 || true
+
+      - name: Install ldid
+        run: |
+          brew install ldid || true
+
       - name: Remove work folders
         run: |
+          echo "before"
+          ls -lah ./
           rm -rf ./* || true
           rm -rf ./.??* || true
+          echo "after"
+          ls -lah ./
+
       - name: Checkout repository
-        uses: actions/checkout@main
+        uses: actions/checkout@v4
 
       - name: Checkout repository submodules
         run: git submodule update --init --recursive
 
-      - name: Set up Xcode version
-        uses: maxim-lobanov/setup-xcode@master
-        with:
-          xcode-version: '26.1'
-
-      - name: Install build tools
-        run: brew install make ldid temurin@8
-
-      - name: Set up Java 8
-        run: |
-          export JAVA_HOME=$(/usr/libexec/java_home -v 1.8)
-          echo "JAVA_HOME=$JAVA_HOME" >> $GITHUB_ENV
-          echo "$JAVA_HOME/bin" >> $GITHUB_PATH
       - name: Get gl4es latest commit hash
         id: gl4es-sha
-        shell: bash
         run: |
-          echo "sha=$(git ls-remote https://github.com/PojavLauncherTeam/gl4es-114-extra refs/heads/master | grep -io '^\S*')" >> $GITHUB_OUTPUT
+          echo "sha=$(git ls-remote https://github.com/locationovo/gl4es-114-extra refs/heads/master | grep -io '^\S*')" >> $GITHUB_OUTPUT
+
       - name: Cache gl4es
-        uses: actions/cache@main
+        uses: actions/cache@v4
         if: false
         id: gl4es-cache
         with:
@@ -62,9 +79,9 @@ jobs:
 
       - name: Get gl4es
         if: false && steps.gl4es-cache.outputs.cache-hit != 'true'
-        uses: actions/checkout@main
+        uses: actions/checkout@v4
         with:
-          repository: 'PojavLauncherTeam/gl4es-114-extra'
+          repository: 'locationovo/gl4es-114-extra'
           path: 'gl4es'
 
       - name: Build gl4es
@@ -72,63 +89,197 @@ jobs:
         continue-on-error: true
         run: |
           cd gl4es
-          git config --global user.email "github-actions@users.noreply.github.com"
-          git config --global user.name "github-actions"
+          git config user.email "github-actions@users.noreply.github.com"
+          git config user.name "github-actions"
+          export PATH=/opt/procursus/bin:$PATH
           wget https://github.com/leetal/ios-cmake/raw/master/ios.toolchain.cmake
           cmake -B build -DCMAKE_TOOLCHAIN_FILE=ios.toolchain.cmake -DDEFAULT_ES=2 \
             -DNOX11=ON -DNOEGL=OFF -DSTATICLIB=OFF -DPLATFORM=OS64 \
             -DCMAKE_C_FLAGS=-Wno-error=implicit-function-declaration
-          cmake --build build --config RelWithDebInfo --target GL
-          cp -R lib/libGL.dylib ../Natives/resources/Frameworks/libgl4es_114.dylib
+          cmake --build build --config RelWithDebInfo --target GL || true
+          cp -R lib/libGL.dylib ../Natives/resources/Frameworks/libgl4es_114.dylib || true
+
       - name: Push gl4es
-        if: false && github.event != 'pull_request' && github.ref_name == 'main' && steps.gl4es-cache.outputs.cache-hit != 'true'
+        if: false && github.event_name != 'pull_request' && github.ref_name == 'main' && steps.gl4es-cache.outputs.cache-hit != 'true'
         continue-on-error: true
         run: |
-          git add Natives/resources/Frameworks/libgl4es_114.dylib
-          git commit -am "CI: Update gl4es"
-          git push
-      - name: Build for ${{ matrix.platform_name }}
+          cd gl4es
+          git add lib/libGL.dylib
+          git commit -m "Update gl4es"
+          git push || true
+
+      - name: Download MobileGlues artifact
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          export PATH=/opt/homebrew/bin:$PATH
-          export SLIMMED=1
-          if [ "${{ matrix.platform_name }}" == "ios" ]; then
-            gmake -j1 java PLATFORM=${{ matrix.platform }}
-            gmake -j$(sysctl -n hw.ncpu) dsym package PLATFORM=${{ matrix.platform }}
-            gmake -j$(sysctl -n hw.ncpu) dsym package PLATFORM=${{ matrix.platform }} TROLLSTORE_JIT_ENT=1
-          elif [ "${{ matrix.platform_name }}" == "tvos" ]; then
-            gmake -j1 java PLATFORM=${{ matrix.platform }}
-            gmake -j$(sysctl -n hw.ncpu) dsym package PLATFORM=${{ matrix.platform }} TROLLSTORE_JIT_ENT=1
-          else
-            gmake -j1 java PLATFORM=${{ matrix.platform }}
-            gmake -j$(sysctl -n hw.ncpu) dsym package PLATFORM=${{ matrix.platform }}
+          set -e
+          REPO="MobileGL-Dev/MobileGlues"
+          RUN_ID="24915154905"
+          NAME="MobileGlues-iOS-dylib"
+
+          echo "REPO=${REPO}"
+          echo "RUN_ID=${RUN_ID}"
+          echo "NAME=${NAME}"
+
+          mkdir -p mobileglues-artifact
+          TARGET="mobileglues-artifact/libmobileglues.dylib"
+          if [ -f "$TARGET" ]; then
+            echo "libmobileglues.dylib already exists, skipping."
+            exit 0
           fi
-      - name: Upload regular ipa
-        uses: actions/upload-artifact@main
-        with:
-          name: org.angelauramc.amethyst-${{ matrix.platform_name }}.ipa
-          path: artifacts/org.angelauramc.amethyst-*-${{ matrix.platform_name }}.ipa
 
-      - name: Upload regular tipa
-        uses: actions/upload-artifact@main
-        with:
-          name: org.angelauramc.amethyst-${{ matrix.platform_name }}-trollstore.tipa
-          path: artifacts/org.angelauramc.amethyst-*-${{ matrix.platform_name }}-trollstore.tipa
+          echo "Downloading MobileGlues artifact..."
+          gh run download "$RUN_ID" \
+            --repo "$REPO" \
+            --name "$NAME" \
+            --dir mg_artifact
 
-      - name: Upload slimmed ipa
-        uses: actions/upload-artifact@main
-        with:
-          name: org.angelauramc.amethyst.slimmed-${{ matrix.platform_name }}.ipa
-          path: artifacts/org.angelauramc.amethyst.slimmed-*-${{ matrix.platform_name }}.ipa
+          echo "Downloaded contents:"
+          find mg_artifact -type f | head -30
 
-      - name: Upload slimmed tipa
-        uses: actions/upload-artifact@main
-        with:
-          name: org.angelauramc.amethyst.slimmed-${{ matrix.platform_name }}-trollstore.tipa
-          path: artifacts/org.angelauramc.amethyst.slimmed-*-${{ matrix.platform_name }}-trollstore.tipa
+          DYLIB=$(find mg_artifact -name "*.dylib" -type f | head -1)
+          if [ -z "$DYLIB" ]; then
+            echo "ERROR: No .dylib found in artifact"
+            exit 1
+          fi
 
-      - name: Upload PojavLauncher.dSYM
-        uses: actions/upload-artifact@main
-        if: matrix.platform_name == 'ios'
+          echo "Found dylib: $DYLIB"
+          cp "$DYLIB" "$TARGET"
+          rm -rf mg_artifact
+
+          if [ -f "$TARGET" ]; then
+            echo "libmobileglues.dylib installed: $(ls -lh $TARGET)"
+          else
+            echo "ERROR: dylib copy failed"
+            exit 1
+          fi
+
+      - name: Pre-download JRE tarballs (Java 8, 17, 21)
+        run: |
+          set -e
+          mkdir -p depends
+          cd depends
+
+          echo "--- Java 8 ---"
+          if [ ! -f "java-8-openjdk/release" ]; then
+            if ls jre8-ios-aarch64.zip 2>/dev/null; then
+              echo "Java 8 archive already exists, skipping download."
+            else
+              echo "Downloading Java 8..."
+              wget -q --show-progress "https://crystall1ne.dev/cdn/amethyst-ios/jre8-ios-aarch64.zip" || echo "WARNING: Java 8 download failed"
+              if ls jre8-ios-aarch64.zip 2>/dev/null; then
+                unzip -q jre8-ios-aarch64.zip && rm -f jre8-ios-aarch64.zip
+              fi
+            fi
+          else
+            echo "Java 8 already extracted, skipping."
+          fi
+
+          echo "--- Java 17 ---"
+          if [ ! -f "java-17-openjdk/release" ]; then
+            if ls jre17-ios-aarch64.zip 2>/dev/null; then
+              echo "Java 17 archive already exists, skipping download."
+            else
+              echo "Downloading Java 17..."
+              wget -q --show-progress "https://crystall1ne.dev/cdn/amethyst-ios/jre17-ios-aarch64.zip" || echo "WARNING: Java 17 download failed"
+              if ls jre17-ios-aarch64.zip 2>/dev/null; then
+                unzip -q jre17-ios-aarch64.zip && rm -f jre17-ios-aarch64.zip
+              fi
+            fi
+          else
+            echo "Java 17 already extracted, skipping."
+          fi
+
+          echo "--- Java 21 ---"
+          if [ ! -f "java-21-openjdk/release" ]; then
+            if ls jre21-ios-aarch64.zip 2>/dev/null; then
+              echo "Java 21 archive already exists, skipping download."
+            else
+              echo "Downloading Java 21..."
+              wget -q --show-progress "https://crystall1ne.dev/cdn/amethyst-ios/jre21-ios-aarch64.zip" || echo "WARNING: Java 21 download failed"
+              if ls jre21-ios-aarch64.zip 2>/dev/null; then
+                unzip -q jre21-ios-aarch64.zip && rm -f jre21-ios-aarch64.zip
+              fi
+            fi
+          else
+            echo "Java 21 already extracted, skipping."
+          fi
+
+      - name: Pre-download JRE tarball (Java 25)
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -e
+          mkdir -p depends
+          cd depends
+
+          echo "--- Java 25 ---"
+          if [ -f "java-25-openjdk/release" ]; then
+            echo "Java 25 already extracted, skipping."
+            exit 0
+          fi
+
+          TARBALL="jre25-ios-arm64-20260509-release.tar.xz"
+
+          if [ -f "$TARBALL" ]; then
+            echo "Tarball already exists, extracting..."
+          else
+            echo "Downloading Java 25 via gh release..."
+            gh release download jre25-ios-v10 \
+              --repo vibecodest/Amethyst-iOS \
+              --pattern "jre25-ios-arm64-20260509-release.tar.xz" \
+              --dir .
+          fi
+
+          echo "Extracting JRE..."
+          mkdir -p java-25-openjdk
+          tar -xJf "$TARBALL" -C java-25-openjdk
+          rm -f "$TARBALL"
+
+          if [ -f "java-25-openjdk/release" ]; then
+            echo "Java 25 JRE extracted successfully."
+          else
+            echo "ERROR: Extraction failed"
+            ls -lh java-25-openjdk/
+            exit 1
+          fi
+
+      - name: Build native & Java (without JRE)
+        run: |
+          set -e
+          export PATH="/opt/homebrew/opt/make/libexec/gnubin:$PATH"
+          export RUNNER=1
+          gmake native java
+
+      - name: Build JRE
+        run: |
+          set -e
+          export PATH="/opt/homebrew/opt/make/libexec/gnubin:$PATH"
+          export RUNNER=1
+          gmake jre
+
+      - name: Build assets, payload, package, dsym
+        run: |
+          set -e
+          export PATH="/opt/homebrew/opt/make/libexec/gnubin:$PATH"
+          export RUNNER=1
+          gmake assets payload package dsym
+
+      - name: Upload IPA artifact
+        if: always()
+        uses: actions/upload-artifact@v4
         with:
-          name: AngelAuraAmethyst.dSYM
-          path: artifacts/AngelAuraAmethyst.dSYM
+          name: Amethyst-${{ matrix.platform_name }}-${{ github.run_id }}
+          path: |
+            artifacts/*.ipa
+            artifacts/*.tipa
+          retention-days: 90
+
+      - name: Upload dSYM artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: Amethyst-dSYM-${{ matrix.platform_name }}-${{ github.run_id }}
+          path: |
+            artifacts/AngelAuraAmethyst.dSYM
+          retention-days: 90
